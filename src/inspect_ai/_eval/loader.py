@@ -30,7 +30,7 @@ from inspect_ai._util.rich import escape_control_characters
 from inspect_ai.agent._agent import Agent
 from inspect_ai.agent._as_solver import as_solver
 from inspect_ai.dataset import Dataset
-from inspect_ai.log import EvalLog
+from inspect_ai.log import EvalLog, EvalSpec
 from inspect_ai.model import Model
 from inspect_ai.scorer._metric import Metric, MetricSpec, metric_create
 from inspect_ai.scorer._scorer import Scorer, ScorerSpec, scorer_create
@@ -90,12 +90,30 @@ def sample_shuffle_enabled(sample_shuffle: bool | int | None) -> bool:
 def apply_sample_shuffle(dataset: Dataset, sample_shuffle: bool | int | None) -> None:
     """Shuffle a task's dataset as the `sample_shuffle` eval option asks.
 
-    New and retried tasks both go through here, so a retry given the logged
-    value selects the same samples as the run it retries. A dataset that is
+    New and retried tasks both go through here, so a retry given
+    `logged_sample_shuffle()` selects the same samples as the run it retries
+    (except with `True`, which shuffles randomly each time). A dataset that is
     already shuffled is left as it is.
     """
     if sample_shuffle_enabled(sample_shuffle) and not dataset.shuffled:
         dataset.shuffle(None if sample_shuffle is True else sample_shuffle)
+
+
+def logged_sample_shuffle(eval_spec: EvalSpec) -> bool | int | None:
+    """The `sample_shuffle` value that selected a log's samples.
+
+    Before 0 was treated as a seed, `eval()` logged `sample_shuffle=0` but kept
+    the dataset order. Such logs record the dataset as not shuffled, which a
+    seed-0 run now never does, so they are read as `False`.
+    """
+    sample_shuffle = eval_spec.config.sample_shuffle
+    if (
+        sample_shuffle == 0
+        and not isinstance(sample_shuffle, bool)
+        and eval_spec.dataset.shuffled is False
+    ):
+        return False
+    return sample_shuffle
 
 
 def resolve_tasks(

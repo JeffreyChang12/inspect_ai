@@ -80,7 +80,7 @@ from inspect_ai.log._file import (
     write_log_dir_manifest,
     write_log_listing,
 )
-from inspect_ai.log._log import EvalConfig
+from inspect_ai.log._log import EvalConfig, EvalSpec
 from inspect_ai.log._recorders.buffer.buffer import cleanup_sample_buffers_for_log
 from inspect_ai.log._recorders.buffer.database import sample_buffer_shutdown_pending
 from inspect_ai.model import (
@@ -141,7 +141,12 @@ from .eval_set_selection import (
     eval_set_selection_requested,
     read_eval_set_selection,
 )
-from .loader import resolve_task_args, sample_shuffle_enabled, solver_from_spec
+from .loader import (
+    logged_sample_shuffle,
+    resolve_task_args,
+    sample_shuffle_enabled,
+    solver_from_spec,
+)
 from .task import Epochs
 from .task.resolved import ResolvedTask, resolved_task_names
 from .task.scan import scan_context
@@ -1108,7 +1113,7 @@ def eval_set(
         reusable_logs = [
             log
             for log in all_logs
-            if not shuffle_changed(sample_shuffle, log.header.eval.config, limit)
+            if not shuffle_changed(sample_shuffle, log.header.eval, limit)
         ]
         log_task_identifiers = [log.task_identifier for log in reusable_logs]
         all_tasks = [
@@ -1932,16 +1937,16 @@ def log_samples_complete(
 
 def shuffle_changed(
     sample_shuffle: bool | int | None,
-    config: EvalConfig,
+    eval_spec: EvalSpec,
     limit: int | tuple[int, int] | None,
 ) -> bool:
     # shuffle only matters when there's a limit constraining which samples run
     if limit is None:
         return False
+    logged = logged_sample_shuffle(eval_spec)
     # False == 0, but False doesn't shuffle while 0 is a seed
-    return sample_shuffle != config.sample_shuffle or (
-        sample_shuffle_enabled(sample_shuffle)
-        != sample_shuffle_enabled(config.sample_shuffle)
+    return sample_shuffle != logged or (
+        sample_shuffle_enabled(sample_shuffle) != sample_shuffle_enabled(logged)
     )
 
 

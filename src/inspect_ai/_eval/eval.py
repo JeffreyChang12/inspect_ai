@@ -115,7 +115,12 @@ from inspect_ai.util._limit import TokenLimit, token_limit_fields
 from inspect_ai.util._notify import build_apprise, init_apprise
 
 from .context import init_eval_context
-from .loader import resolve_task_file_sandbox, resolve_task_source, resolve_tasks
+from .loader import (
+    logged_sample_shuffle,
+    resolve_task_file_sandbox,
+    resolve_task_source,
+    resolve_tasks,
+)
 from .run import TaskInjection, eval_run
 from .task import Epochs, PreviousTask, Task, TaskSource
 from .task.enqueue import (
@@ -1840,7 +1845,7 @@ async def eval_retry_async(
         sample_id = _requalify_sample_ids(
             eval_log.eval.task, eval_log.eval.config.sample_id
         )
-        sample_shuffle = eval_log.eval.config.sample_shuffle
+        sample_shuffle = logged_sample_shuffle(eval_log.eval)
         epochs = (
             Epochs(eval_log.eval.config.epochs, eval_log.eval.config.epochs_reducer)
             if eval_log.eval.config.epochs

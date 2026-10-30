@@ -2402,6 +2402,37 @@ def test_eval_set_shuffle_seed_zero_not_reused_with_limit(tmp_path: Path):
     assert logs[0].eval.eval_id != first_eval_id
 
 
+def test_eval_set_seed_zero_log_that_kept_order_not_reused_with_limit(tmp_path: Path):
+    """A log that recorded sample_shuffle=0 but kept the dataset order (as eval() did before 0 was a seed) should not be reused for seed 0."""
+    task1 = hello_world(samples=10)
+    log_dir = str(tmp_path)
+
+    # Run without shuffle, limit=5, then record sample_shuffle=0 in the log
+    [result, logs] = eval_set(
+        tasks=[task1],
+        log_dir=log_dir,
+        model="mockllm/model",
+        limit=5,
+    )
+    assert result
+    first_eval_id = logs[0].eval.eval_id
+    log = read_eval_log(logs[0].location)
+    assert log.eval.dataset.shuffled is False
+    log.eval.config.sample_shuffle = 0
+    write_eval_log(log)
+
+    # Run with shuffle seed 0 and same limit - should NOT reuse the log
+    [result, logs] = eval_set(
+        tasks=[task1],
+        log_dir=log_dir,
+        model="mockllm/model",
+        limit=5,
+        sample_shuffle=0,
+    )
+    assert result
+    assert logs[0].eval.eval_id != first_eval_id
+
+
 def test_eval_set_bundle_when_all_complete(tmp_path: Path) -> None:
     """Test that bundle is created even when all logs are already complete."""
     task1 = hello_world()
