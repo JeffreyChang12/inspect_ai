@@ -11,6 +11,7 @@ from typing import (
     Literal,
     NamedTuple,
     Protocol,
+    TypeGuard,
     TypeVar,
     overload,
 )
@@ -29,6 +30,7 @@ from inspect_ai.event._info import InfoEvent
 from inspect_ai.event._interrupt import InterruptEvent
 from inspect_ai.event._model import ModelEvent
 from inspect_ai.event._sample_init import SampleInitEvent
+from inspect_ai.event._span import SpanBeginEvent
 from inspect_ai.event._store import StoreEvent
 from inspect_ai.event._timeline import Timeline
 from inspect_ai.log._condense import (
@@ -39,7 +41,13 @@ from inspect_ai.log._condense import (
 )
 from inspect_ai.model._chat_message import ChatMessageBase
 from inspect_ai.model._model_call import ModelCall
-from inspect_ai.util._store import store, store_changes, store_jsonable
+from inspect_ai.util._span import AgentSpans
+from inspect_ai.util._store import (
+    store,
+    store_changes,
+    store_events_suspended,
+    store_jsonable,
+)
 
 if TYPE_CHECKING:
     from inspect_ai.log._recorders.buffer.types import TranscriptEventSink
@@ -47,7 +55,7 @@ if TYPE_CHECKING:
 logger = getLogger(__name__)
 
 
-ET = TypeVar("ET", bound=BaseEvent)
+ET = TypeVar("ET", bound=Event)
 
 
 @dataclass(frozen=True)
@@ -444,6 +452,70 @@ class TranscriptHistory:
             return events[index:]
         return events
 
+    @overload
+    def find_last(self, predicate: Callable[[Event], TypeGuard[ET]]) -> ET | None: ...
+
+    @overload
+    def find_last(self, predicate: Callable[[Event], bool]) -> Event | None: ...
+
+    def find_last(self, predicate: Callable[[Event], bool]) -> Event | None:
+        """Return the most recent event, by logical position, that matches `predicate`.
+
+        Searches newest first and stops at the first match, so finding a
+        recent event reads only recent history. The search covers the history
+        as it was when `find_last` was called: events that `predicate` itself
+        adds (eg. by logging) are not searched.
+
+        With a history provider, the trailing resident window is searched
+        first, then evicted events are read back from the provider in pages
+        that grow from 16 to 256 events, strictly newest first, so older
+        events kept in memory (pinned or pending) are found in their logical
+        place. Without a provider, the resident events are searched newest
+        first. No events are retained.
+
+        Args:
+            predicate: Called with each event until it returns `True`.
+
+        Returns:
+            The most recent matching event, or `None` if no event matches.
+
+        Raises:
+            TranscriptHistoryUnavailableError: If the search requires history
+                that is unavailable; without a provider, this occurs after no
+                resident event matches and events have been evicted.
+        """
+        transcript = self._transcript
+        events = transcript._events  # appended to, or replaced on eviction
+        resident = len(events)
+        count = transcript._event_count
+        truncated = transcript._events_truncated
+        provider = transcript._history_provider
+        trailing = max(0, min(transcript._resident_tail, resident))
+
+        if not truncated or provider is None:
+            for index in range(resident - 1, -1, -1):
+                if predicate(events[index]):
+                    return events[index]
+            if truncated:
+                raise TranscriptHistoryUnavailableError(
+                    "Full transcript history is not available from this Transcript"
+                )
+            return None
+
+        for index in range(resident - 1, resident - trailing - 1, -1):
+            if predicate(events[index]):
+                return events[index]
+        end = count - trailing
+        window = 16
+        while end > 0:
+            start = max(0, end - window)
+            for event in reversed(provider.events_from(start, end - start)):
+                if predicate(event):
+                    return event
+            end = start
+            window = min(window * 2, 256)
+        return None
+
 
 class Transcript:
     """Transcript of events."""
@@ -508,6 +580,9 @@ class Transcript:
             on_release=self._release_message_refs
         )
         self._timelines: list[Timeline] = []
+        self._agent_spans = AgentSpans()
+        for event in self._events:
+            self._add_span(event)
         self._model_call_counts: dict[str, int] = {}
         self._kept_event_ids: set[str] = set()
         self._bounded = bounded
@@ -634,6 +709,7 @@ class Transcript:
             raise ValueError(f"Duplicate event uuid: {event_key}")
         self._process_event(event)
         self._events.append(event)
+        self._add_span(event)
         self._resident_event_ids.add(event_key)
         self._set_attachment_refs(event)
         self._event_count += 1
@@ -679,6 +755,7 @@ class Transcript:
             condensed_events, resolved_events, event_keys
         ):
             self._events.append(event)
+            self._add_span(event)
             self._resident_event_ids.add(event_key)
             self._set_attachment_refs(condensed)
             self._event_count += 1
@@ -688,6 +765,22 @@ class Transcript:
             if notify_subscribers:
                 self._notify_subscribers(event)
         self._evict_events()
+
+    def _add_span(self, event: Event) -> None:
+        if isinstance(event, SpanBeginEvent):
+            self._agent_spans.add(event)
+
+    def _agent_span(self, span_id: str) -> str | None:
+        """The innermost agent span at or above the span `span_id`, from the spans begun in this transcript (see `AgentSpans`).
+
+        Raises:
+            ValueError: No span `span_id` was begun in this transcript, or the span tree has a `parent_id` cycle.
+        """
+        if span_id not in self._agent_spans:
+            raise ValueError(
+                f"The span {span_id!r} was not begun in this transcript: its SpanBeginEvent must be recorded before the span is named."
+            )
+        return self._agent_spans.agent_span(span_id)
 
     def _event_updated(self, event: Event) -> None:
         if self._is_resident(event):
@@ -1037,13 +1130,47 @@ def record_interrupt_event(
 
 @contextlib.contextmanager
 def track_store_changes() -> Iterator[None]:
-    before = store_jsonable(store())
-    yield
-    after = store_jsonable(store())
+    """Log a `StoreEvent` with the store changes made in the block.
 
-    changes = store_changes(before, after)
-    if changes:
-        transcript()._event(StoreEvent(changes=changes))
+    The changes are logged on every exit, including when the block raises or
+    is cancelled. On that path any failure to log them, including a
+    `BaseException`, is logged as a warning rather than raised (and a failure
+    of the warning is ignored), so it cannot replace the block's exception.
+    `KeyboardInterrupt` and `SystemExit` are the exception: they propagate.
+    Nothing is logged on `GeneratorExit` (an abandoned span being finalized).
+    """
+    if store_events_suspended():
+        yield
+        return
+
+    before = store_jsonable(store())
+
+    def log_changes() -> None:
+        after = store_jsonable(store())
+        changes = store_changes(before, after)
+        if changes:
+            transcript()._event(StoreEvent(changes=changes))
+
+    try:
+        yield
+    except GeneratorExit:
+        # an abandoned span may be finalized in another context, where
+        # store() and transcript() are not the span's
+        raise
+    except BaseException:
+        try:
+            log_changes()
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            try:
+                logger.warning("Unable to log store changes for span", exc_info=True)
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException:
+                pass
+        raise
+    log_changes()
 
 
 def init_transcript(transcript: Transcript) -> None:
