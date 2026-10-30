@@ -141,7 +141,7 @@ from .eval_set_selection import (
     eval_set_selection_requested,
     read_eval_set_selection,
 )
-from .loader import resolve_task_args, solver_from_spec
+from .loader import resolve_task_args, sample_shuffle_enabled, solver_from_spec
 from .task import Epochs
 from .task.resolved import ResolvedTask, resolved_task_names
 from .task.scan import scan_context
@@ -1938,7 +1938,11 @@ def shuffle_changed(
     # shuffle only matters when there's a limit constraining which samples run
     if limit is None:
         return False
-    return sample_shuffle != config.sample_shuffle
+    # False == 0, but False doesn't shuffle while 0 is a seed
+    return sample_shuffle != config.sample_shuffle or (
+        sample_shuffle_enabled(sample_shuffle)
+        != sample_shuffle_enabled(config.sample_shuffle)
+    )
 
 
 def epochs_changed(epochs: Epochs | None, config: EvalConfig) -> bool:
