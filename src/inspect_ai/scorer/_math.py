@@ -1320,6 +1320,7 @@ def math(*, timeout: float = _DEFAULT_TIMEOUT_SECONDS) -> Scorer:
         except TimeoutError:
             worker.started = False
             return Score.unscored(
+                reason="scoring_failed",
                 explanation="Mathematical target exceeded the parsing time limit.",
                 metadata=_status_metadata("target_timeout"),
             )
@@ -1343,6 +1344,7 @@ def math(*, timeout: float = _DEFAULT_TIMEOUT_SECONDS) -> Scorer:
             return Score(
                 value=INCORRECT,
                 explanation="Mathematical answer exceeded the scoring time limit.",
+                reason="scoring_failed",
                 metadata=_status_metadata("answer_timeout"),
             )
 
