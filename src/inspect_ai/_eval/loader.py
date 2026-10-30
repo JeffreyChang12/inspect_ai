@@ -29,7 +29,8 @@ from inspect_ai._util.registry import (
 from inspect_ai._util.rich import escape_control_characters
 from inspect_ai.agent._agent import Agent
 from inspect_ai.agent._as_solver import as_solver
-from inspect_ai.log import EvalLog
+from inspect_ai.dataset import Dataset
+from inspect_ai.log import EvalLog, EvalSpec
 from inspect_ai.model import Model
 from inspect_ai.scorer._metric import Metric, MetricSpec, metric_create
 from inspect_ai.scorer._scorer import Scorer, ScorerSpec, scorer_create
@@ -74,6 +75,47 @@ def _merge_model_roles(
     return merged or None
 
 
+def sample_shuffle_enabled(sample_shuffle: bool | int | None) -> bool:
+    """Whether the `sample_shuffle` eval option shuffles the dataset.
+
+    `True` shuffles randomly and an int is the seed, so 0 shuffles too. `None`
+    and `False` keep the dataset order. `bool` is a subclass of `int`
+    (`False == 0`), so a bool is never taken as a seed.
+    """
+    if isinstance(sample_shuffle, int) and not isinstance(sample_shuffle, bool):
+        return True
+    return bool(sample_shuffle)
+
+
+def apply_sample_shuffle(dataset: Dataset, sample_shuffle: bool | int | None) -> None:
+    """Shuffle a task's dataset as the `sample_shuffle` eval option asks.
+
+    New and retried tasks both go through here, so a retry given
+    `logged_sample_shuffle()` selects the same samples as the run it retries
+    (except with `True`, which shuffles randomly each time). A dataset that is
+    already shuffled is left as it is.
+    """
+    if sample_shuffle_enabled(sample_shuffle) and not dataset.shuffled:
+        dataset.shuffle(None if sample_shuffle is True else sample_shuffle)
+
+
+def logged_sample_shuffle(eval_spec: EvalSpec) -> bool | int | None:
+    """The `sample_shuffle` value that selected a log's samples.
+
+    Before 0 was treated as a seed, `eval()` logged `sample_shuffle=0` but kept
+    the dataset order. Such logs record the dataset as not shuffled, which a
+    seed-0 run now never does, so they are read as `False`.
+    """
+    sample_shuffle = eval_spec.config.sample_shuffle
+    if (
+        sample_shuffle == 0
+        and not isinstance(sample_shuffle, bool)
+        and eval_spec.dataset.shuffled is False
+    ):
+        return False
+    return sample_shuffle
+
+
 def resolve_tasks(
     tasks: Tasks,
     task_args: dict[str, Any],
@@ -102,13 +144,8 @@ def resolve_tasks(
         )
 
     def as_resolved_tasks(tasks: list[Task]) -> list[ResolvedTask]:
-        # shuffle data in tasks if requested
-        if sample_shuffle:
-            for task in tasks:
-                if not task.dataset.shuffled:
-                    task.dataset.shuffle(
-                        None if sample_shuffle is True else sample_shuffle
-                    )
+        for task in tasks:
+            apply_sample_shuffle(task.dataset, sample_shuffle)
 
         return [
             ResolvedTask(
@@ -307,11 +344,7 @@ def resolve_previous_tasks(
             else:
                 loaded_task_args = previous_task.task_args
                 loaded_task = load_tasks([previous_task.task], loaded_task_args)[0]
-            if sample_shuffle is not None:
-                if not loaded_task.dataset.shuffled:
-                    loaded_task.dataset.shuffle(
-                        None if sample_shuffle is True else sample_shuffle
-                    )
+            apply_sample_shuffle(loaded_task.dataset, sample_shuffle)
             result.append(
                 resolve_previous_task(
                     loaded_task,
